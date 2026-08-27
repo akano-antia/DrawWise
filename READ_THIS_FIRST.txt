@@ -1,0 +1,18 @@
+DrawWise 5.3.3 Installer Builder
+===============================
+
+This build fixes the manual draw-history workflow in the installed desktop app.
+
+After installing DrawWise 5.3.3:
+1. Select the game that matches the downloaded Lottery result file.
+2. Under RESULT HISTORY click "Import history file".
+3. Choose the downloaded CSV or Excel workbook.
+4. Review the preview showing new/corrected records.
+5. Approve the import. DrawWise backs up the previous history automatically.
+
+"Update online results" remains available for automatic source checks.
+"Advanced Tools" is also fixed, but it is no longer required just to import history.
+
+BUILD:
+Double-click BUILD_SETUP.bat on Windows.
+The finished installer appears in installer-output\DrawWise-Setup-5.3.3.exe

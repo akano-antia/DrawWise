@@ -1,0 +1,16 @@
+DrawWise 5.3.3 Installer Builder — Full Reliability Build
+========================================================
+
+This is a fresh, self-contained installer builder.
+It does NOT require any previous DrawWise installer-builder folder.
+
+Reliability change:
+- PowerShell Compress-Archive is not used for the PyInstaller payload.
+- Windows tar.exe ZIP creation is used with automatic retries for transient Defender/indexing file locks.
+- Stale build, dist, installer-output, stage, and payload folders are cleaned before rebuilding.
+
+Run:
+  BUILD_SETUP.bat
+
+Expected output:
+  installer-output\DrawWise-Setup-5.3.3.exe
