@@ -9,7 +9,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from app_paths import APP_NAME, APP_VERSION, ensure_runtime_layout, reports_root, resource_root, user_root
 
@@ -19,6 +19,8 @@ if str(RESOURCE_ROOT) not in sys.path:
 
 from core.data import merge_history, write_draws
 from core.engine import LotteryEngine
+from core.intelligence import OBJECTIVES
+from core.ai_copilot import DEFAULT_MODEL, local_strategy_review, openai_strategy_review
 from core.history_expansion import load_flexible_csv
 from core.online_updates import (
     OnlineUpdateError,
@@ -70,6 +72,16 @@ SPECIAL_STYLES = {
 LINE_OPTIONS = (1, 3, 5, 10, 20)
 
 
+def alternatives_need_scroll(line_count: int) -> bool:
+    """Return True when alternative ticket cards should use a scrollable viewport.
+
+    Five-line portfolios need scrolling once the sticky Recommended card and the
+    AI Copilot share the available vertical space.  Three-line portfolios still
+    fit comfortably without a canvas.
+    """
+    return line_count >= 5
+
+
 class SmartPickApp(tk.Tk):
     """Simple personal front end for DrawWise.
 
@@ -84,10 +96,13 @@ class SmartPickApp(tk.Tk):
         self.engine = LotteryEngine(self.runtime_root)
         self.last_result = None
         self._refresh_thread: threading.Thread | None = None
+        self._ai_thread: threading.Thread | None = None
+        self.ai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        self.ai_model = os.environ.get("DRAWWISE_AI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
-        self.title(f"{APP_NAME} {APP_VERSION} — Smart Pick")
-        self.geometry("1280x820")
-        self.minsize(1040, 680)
+        self.title(f"{APP_NAME} {APP_VERSION} — Maximum Intelligence")
+        self.geometry("1480x860")
+        self.minsize(1180, 720)
         self.configure(bg=PALETTE["bg"])
 
         icon = RESOURCE_ROOT / "assets" / "drawwise.ico"
@@ -132,6 +147,12 @@ class SmartPickApp(tk.Tk):
             lightcolor=[("focus", PALETTE["blue_bright"])],
             darkcolor=[("focus", PALETTE["blue_bright"])],
         )
+        style.configure(
+            "Ticket.Vertical.TScrollbar",
+            width=16, arrowsize=14,
+            troughcolor="#EEF2F7", background="#94A3B8",
+            bordercolor="#D7E0EB", lightcolor="#CBD5E1", darkcolor="#64748B",
+        )
 
     def _button(self, parent, text, command, *, bg, fg="white", small=False, subtle=False):
         return tk.Button(
@@ -160,7 +181,8 @@ class SmartPickApp(tk.Tk):
         self.lines_var = tk.StringVar(value="5")
         self.status_var = tk.StringVar(value="Ready")
         self.history_var = tk.StringVar(value="Loading history…")
-        self.mode_var = tk.StringVar(value="Smart portfolio")
+        self.mode_var = tk.StringVar(value="Maximum Intelligence portfolio")
+        self.objective_var = tk.StringVar(value=OBJECTIVES[0])
         self.view_var = tk.StringVar(value="pick")
 
         shell = tk.Frame(self, bg=PALETTE["bg"])
@@ -171,7 +193,7 @@ class SmartPickApp(tk.Tk):
         self.sidebar.pack_propagate(False)
 
         self.main = tk.Frame(shell, bg=PALETTE["bg"])
-        self.main.pack(side="left", fill="both", expand=True, padx=24, pady=20)
+        self.main.pack(side="left", fill="both", expand=True, padx=24, pady=14)
 
         self._build_sidebar()
         self._build_main()
@@ -199,7 +221,9 @@ class SmartPickApp(tk.Tk):
         self.pick_nav = self._sidebar_nav(nav, "◎  Smart Pick", lambda: self._show_view("pick"), active=True)
         self.pick_nav.pack(fill="x", pady=(0, 6))
         self.saved_nav = self._sidebar_nav(nav, "▣  Saved Picks", lambda: self._show_view("saved"))
-        self.saved_nav.pack(fill="x")
+        self.saved_nav.pack(fill="x", pady=(0, 6))
+        self.advanced_nav = self._sidebar_nav(nav, "⚙  Advanced Tools", self.open_advanced)
+        self.advanced_nav.pack(fill="x")
 
         tk.Label(s, text="CHOOSE GAME", bg=PALETTE["sidebar"], fg=PALETTE["sidebar_muted"],
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=padx)
@@ -216,22 +240,28 @@ class SmartPickApp(tk.Tk):
             s, textvariable=self.lines_var, values=[str(n) for n in LINE_OPTIONS], state="readonly",
             style="Smart.TCombobox", font=("Segoe UI", 11), takefocus=True,
         )
-        self.lines_combo.pack(fill="x", padx=padx, pady=(7, 15), ipady=2)
+        self.lines_combo.pack(fill="x", padx=padx, pady=(7, 12), ipady=2)
         self.lines_combo.bind("<<ComboboxSelected>>", lambda _e: self.on_lines_changed())
+
+        tk.Label(s, text="OPTIMISATION OBJECTIVE", bg=PALETTE["sidebar"], fg=PALETTE["sidebar_muted"],
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=padx)
+        self.objective_combo = ttk.Combobox(
+            s, textvariable=self.objective_var, values=list(OBJECTIVES), state="readonly",
+            style="Smart.TCombobox", font=("Segoe UI", 10), takefocus=True,
+        )
+        self.objective_combo.pack(fill="x", padx=padx, pady=(7, 10), ipady=1)
+        self.objective_combo.bind("<<ComboboxSelected>>", lambda _e: self.on_objective_changed())
+
+        self.generate_button = self._button(s, "🎯  GENERATE MY NUMBERS", self.generate, bg="#2563EB")
+        self.generate_button.pack(fill="x", padx=padx, pady=(0, 10))
 
         mode = tk.Frame(s, bg=PALETTE["sidebar_card"], highlightthickness=1,
                         highlightbackground=PALETTE["sidebar_border"])
         mode.pack(fill="x", padx=padx, pady=(0, 14))
         tk.Label(mode, text="SELECTION MODE", bg=PALETTE["sidebar_card"], fg="#8FC4FF",
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=13, pady=(11, 3))
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=13, pady=(8, 2))
         tk.Label(mode, textvariable=self.mode_var, bg=PALETTE["sidebar_card"], fg="#FFFFFF",
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=13)
-        tk.Label(
-            mode,
-            text="One line uses the top-ranked candidate. Multiple lines keep that top pick and spread the alternatives for broader coverage.",
-            bg=PALETTE["sidebar_card"], fg="#E7EFF8", justify="left", wraplength=260,
-            font=("Segoe UI", 9),
-        ).pack(anchor="w", padx=13, pady=(4, 12))
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=13, pady=(0, 8))
 
         history = tk.Frame(s, bg="#0F2D42", highlightthickness=1, highlightbackground="#23577C")
         history.pack(fill="x", padx=padx, pady=(0, 14))
@@ -246,11 +276,6 @@ class SmartPickApp(tk.Tk):
                                           bg="#1D4E73", small=True)
         self.import_button.pack(fill="x", padx=13, pady=(0, 10))
 
-        self.generate_button = self._button(s, "🎯  GENERATE MY NUMBERS", self.generate, bg="#2563EB")
-        self.generate_button.pack(fill="x", padx=padx, pady=(0, 8))
-
-        advanced = self._button(s, "⚙  ADVANCED TOOLS", self.open_advanced, bg="#173B60", small=True)
-        advanced.pack(fill="x", padx=padx, pady=(0, 8))
 
     def _sidebar_nav(self, parent, text, command, active=False):
         return tk.Button(
@@ -265,29 +290,29 @@ class SmartPickApp(tk.Tk):
 
     def _build_main(self):
         head = tk.Frame(self.main, bg=PALETTE["bg"])
-        head.pack(fill="x", pady=(0, 14))
+        head.pack(fill="x", pady=(0, 10))
         left = tk.Frame(head, bg=PALETTE["bg"])
         left.pack(side="left", fill="x", expand=True)
-        tk.Label(left, text="Smart Pick", bg=PALETTE["bg"], fg=PALETTE["ink"],
+        tk.Label(left, text="Maximum Intelligence", bg=PALETTE["bg"], fg=PALETTE["ink"],
                  font=("Segoe UI", 23, "bold")).pack(anchor="w")
-        tk.Label(left, text="Choose a game and how many lines. DrawWise ranks the candidates for you.",
+        tk.Label(left, text="Choose a game, line count and objective. DrawWise optimises the whole portfolio.",
                  bg=PALETTE["bg"], fg=PALETTE["muted"], font=("Segoe UI", 11)).pack(anchor="w", pady=(3, 0))
         self.game_chip = tk.Label(head, text="", bg=PALETTE["soft_blue"], fg="#174EA6",
                                   font=("Segoe UI", 9, "bold"), padx=12, pady=8)
         self.game_chip.pack(side="right", anchor="n")
 
         intro = tk.Frame(self.main, bg="#FFFFFF", highlightthickness=1, highlightbackground=PALETTE["line"])
-        intro.pack(fill="x", pady=(0, 14))
+        intro.pack(fill="x", pady=(0, 10))
         self.intro_accent = tk.Frame(intro, width=5, bg=PALETTE["blue"])
         self.intro_accent.pack(side="left", fill="y")
         ib = tk.Frame(intro, bg="#FFFFFF")
-        ib.pack(side="left", fill="x", expand=True, padx=16, pady=12)
+        ib.pack(side="left", fill="x", expand=True, padx=16, pady=9)
         tk.Label(ib, text="Your candidate selections", bg="#FFFFFF", fg=PALETTE["ink"],
                  font=("Segoe UI", 13, "bold")).pack(anchor="w")
         tk.Label(
             ib,
-            text="DrawWise scores many valid combinations, returns its top-ranked candidate, and diversifies extra lines when you ask for more than one.",
-            bg="#FFFFFF", fg=PALETTE["muted"], font=("Segoe UI", 9), wraplength=900, justify="left",
+            text="DrawWise searches candidate families, controls portfolio overlap, gates weak historical signals, challenges the result against random portfolios and refines the final set.",
+            bg="#FFFFFF", fg=PALETTE["muted"], font=("Segoe UI", 9), wraplength=780, justify="left",
         ).pack(anchor="w", pady=(3, 0))
 
         self.view_stack = tk.Frame(self.main, bg=PALETTE["bg"])
@@ -308,20 +333,20 @@ class SmartPickApp(tk.Tk):
 
         footer = tk.Frame(self.main, bg=PALETTE["bg"])
         footer.pack(fill="x", pady=(9, 0))
-        tk.Label(footer, text="Smart Ensemble ranks structured candidates; it cannot guarantee a future random draw.",
+        tk.Label(footer, text="Maximum Intelligence optimises portfolio structure; fair-draw jackpot odds remain governed by combinatorics.",
                  bg=PALETTE["bg"], fg=PALETTE["muted"], font=("Segoe UI", 8)).pack(side="left")
         tk.Label(footer, textvariable=self.status_var, bg=PALETTE["bg"], fg=PALETTE["muted"],
                  font=("Segoe UI", 9, "bold")).pack(side="right")
 
     def _build_pick_view(self):
         top = tk.Frame(self.pick_view, bg="#FFFFFF")
-        top.pack(fill="x", padx=20, pady=(17, 10))
+        top.pack(fill="x", padx=20, pady=(13, 8))
         tleft = tk.Frame(top, bg="#FFFFFF")
         tleft.pack(side="left", fill="x", expand=True)
         tk.Label(tleft, text="My numbers", bg="#FFFFFF", fg=PALETTE["ink"],
                  font=("Segoe UI", 15, "bold")).pack(anchor="w")
         self.pick_subtitle = tk.Label(tleft, text="Generate a Smart Pick to begin.", bg="#FFFFFF", fg=PALETTE["muted"],
-                                      font=("Segoe UI", 9))
+                                      font=("Segoe UI", 9), justify="left", anchor="w", wraplength=600)
         self.pick_subtitle.pack(anchor="w", pady=(2, 0))
 
         actions = tk.Frame(top, bg="#FFFFFF")
@@ -330,28 +355,45 @@ class SmartPickApp(tk.Tk):
         self.copy_all_button.pack(side="left")
         self.regenerate_button = self._workspace_button(actions, "Regenerate", self.generate, bg="#EAF0F7", fg=PALETTE["ink"])
         self.regenerate_button.pack(side="left", padx=(7, 0))
-        self.save_button = self._workspace_button(actions, "Save picks", self.save_picks, bg="#2563EB", fg="white")
+        self.save_button = self._workspace_button(actions, "Save", self.save_picks, bg="#2563EB", fg="white")
         self.save_button.pack(side="left", padx=(7, 0))
 
         summary = tk.Frame(self.pick_view, bg="#FFFFFF")
-        summary.pack(fill="x", padx=20, pady=(0, 10))
+        summary.pack(fill="x", padx=20, pady=(0, 8))
         self.summary_vars = [tk.StringVar(value="—") for _ in range(4)]
-        labels = ("Lines", "History", "Different numbers", "Selection mode")
+        self.intel_detail_var = tk.StringVar(value="Maximum Intelligence will show exact portfolio odds and challenge results here.")
+        labels = ("Lines", "History gate", "Portfolio rating", "Random challenge")
         for i, label in enumerate(labels):
             card = tk.Frame(summary, bg="#F8FAFC", highlightthickness=1, highlightbackground=PALETTE["line"])
             card.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else 6, 0))
             tk.Label(card, textvariable=self.summary_vars[i], bg="#F8FAFC", fg=PALETTE["ink"],
-                     font=("Segoe UI", 14, "bold")).pack(pady=(10, 1))
+                     font=("Segoe UI", 13, "bold")).pack(pady=(7, 0))
             tk.Label(card, text=label, bg="#F8FAFC", fg=PALETTE["muted"],
-                     font=("Segoe UI", 8, "bold")).pack(pady=(0, 9))
+                     font=("Segoe UI", 8, "bold")).pack(pady=(0, 6))
+
+        tk.Label(
+            self.pick_view, textvariable=self.intel_detail_var, bg="#FFFFFF", fg=PALETTE["muted"],
+            font=("Segoe UI", 8), anchor="w", justify="left", wraplength=900,
+        ).pack(fill="x", padx=22, pady=(0, 6))
 
         # Ticket area.  The Recommended card deliberately lives OUTSIDE the
         # scrollable alternatives canvas.  This makes the top pick sticky and
         # removes the V5.1/V5.2 regression where LINE 02 could become the first
         # visible card after changing line count or regenerating.
-        container = tk.Frame(self.pick_view, bg="#FFFFFF")
-        container.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        body_split = tk.Frame(self.pick_view, bg="#FFFFFF")
+        body_split.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+        container = tk.Frame(body_split, bg="#FFFFFF")
+        container.pack(side="left", fill="both", expand=True)
         self.ticket_container = container
+
+        self.copilot_panel = tk.Frame(
+            body_split, bg="#F8FAFC", width=310,
+            highlightthickness=1, highlightbackground=PALETTE["line"],
+        )
+        self.copilot_panel.pack(side="right", fill="y", padx=(14, 0))
+        self.copilot_panel.pack_propagate(False)
+        self._build_copilot_panel(self.copilot_panel)
 
         self.recommended_host = tk.Frame(container, bg="#FFFFFF")
         # Do not pack it until a result exists.
@@ -359,14 +401,14 @@ class SmartPickApp(tk.Tk):
         self.alternatives_container = tk.Frame(container, bg="#FFFFFF")
         self.alternatives_container.pack(fill="both", expand=True)
 
-        # Short portfolios (3 or 5 lines) are rendered in a normal frame, not a
-        # Canvas.  This is deliberately boring: it removes the platform-specific
-        # canvas y-offset that repeatedly clipped LINE 02 on Windows.  Only long
-        # portfolios (10/20 lines) need a scrollbar.
+        # Three-line portfolios render in a normal frame. Five, ten and twenty-line
+        # portfolios use an explicit scrollable viewport because the sticky Recommended
+        # card and AI Copilot reduce the available vertical space on normal Windows
+        # displays. The viewport is always reset to LINE 02 after regeneration.
         self.static_alternatives_body = tk.Frame(self.alternatives_container, bg="#FFFFFF")
 
         self.ticket_canvas = tk.Canvas(self.alternatives_container, bg="#FFFFFF", highlightthickness=0)
-        self.ticket_scrollbar = ttk.Scrollbar(self.alternatives_container, orient="vertical", command=self.ticket_canvas.yview)
+        self.ticket_scrollbar = ttk.Scrollbar(self.alternatives_container, orient="vertical", command=self.ticket_canvas.yview, style="Ticket.Vertical.TScrollbar")
         self.ticket_body = tk.Frame(self.ticket_canvas, bg="#FFFFFF")
         self.ticket_body.bind("<Configure>", self._on_ticket_body_configure)
         self.ticket_window = self.ticket_canvas.create_window((0, 0), window=self.ticket_body, anchor="nw")
@@ -376,6 +418,144 @@ class SmartPickApp(tk.Tk):
         self.ticket_canvas.bind("<Leave>", lambda _e: self._unbind_ticket_wheel())
         self._use_scrolling_alternatives()
         self._render_empty()
+
+    def _build_copilot_panel(self, parent):
+        tk.Label(
+            parent, text="AI Strategy Copilot", bg="#F8FAFC", fg=PALETTE["ink"],
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", padx=14, pady=(14, 2))
+        tk.Label(
+            parent, text="Works beside the mathematical engine — never replaces it.",
+            bg="#F8FAFC", fg=PALETTE["muted"], font=("Segoe UI", 8),
+            wraplength=296, justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        self.ai_mode_var = tk.StringVar(
+            value=(f"OPENAI • {self.ai_model}" if self.ai_api_key else "LOCAL ANALYSIS • AI NOT CONNECTED")
+        )
+        tk.Label(
+            parent, textvariable=self.ai_mode_var, bg="#EAF3FF", fg="#174EA6",
+            font=("Segoe UI", 8, "bold"), padx=8, pady=5,
+        ).pack(anchor="w", padx=14, pady=(0, 9))
+
+        text_frame = tk.Frame(parent, bg="#F8FAFC")
+        text_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        self.ai_text = tk.Text(
+            text_frame, wrap="word", bg="#FFFFFF", fg=PALETTE["ink"],
+            relief="flat", bd=0, highlightthickness=1, highlightbackground=PALETTE["line"],
+            font=("Segoe UI", 9), padx=10, pady=10, cursor="arrow",
+        )
+        ai_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.ai_text.yview)
+        self.ai_text.configure(yscrollcommand=ai_scroll.set)
+        self.ai_text.pack(side="left", fill="both", expand=True)
+        ai_scroll.pack(side="right", fill="y")
+        self._set_ai_text(
+            "Generate a Maximum Intelligence portfolio. DrawWise will run an immediate local strategy audit here. "
+            "Connect an OpenAI API key for a second, independent AI critique of the same mathematical result."
+        )
+
+        buttons = tk.Frame(parent, bg="#F8FAFC")
+        buttons.pack(fill="x", padx=14, pady=(0, 8))
+        self.ai_review_button = self._workspace_button(
+            buttons, "Review with AI", self.review_with_ai, bg="#2563EB", fg="white"
+        )
+        self.ai_review_button.pack(fill="x")
+        self.ai_connect_button = self._workspace_button(
+            buttons, "Connect / change AI", self.configure_ai, bg="#EAF0F7", fg=PALETTE["ink"]
+        )
+        self.ai_connect_button.pack(fill="x", pady=(6, 0))
+
+        tk.Label(
+            parent,
+            text="Privacy: only the game, generated tickets and portfolio metrics are sent. A pasted API key is kept in memory for this session only.",
+            bg="#F8FAFC", fg=PALETTE["muted"], font=("Segoe UI", 7),
+            wraplength=296, justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 12))
+
+    def _set_ai_text(self, text: str):
+        if not hasattr(self, "ai_text"):
+            return
+        self.ai_text.configure(state="normal")
+        self.ai_text.delete("1.0", "end")
+        self.ai_text.insert("1.0", text)
+        self.ai_text.configure(state="disabled")
+
+    def _show_local_copilot_review(self, result):
+        review = local_strategy_review(result)
+        self._set_ai_text(review.text)
+        if self.ai_api_key:
+            self.ai_mode_var.set(f"OPENAI READY • {self.ai_model}")
+        else:
+            self.ai_mode_var.set("LOCAL ANALYSIS • AI NOT CONNECTED")
+
+    def configure_ai(self):
+        key = simpledialog.askstring(
+            "Connect AI Strategy Copilot",
+            "Paste an OpenAI API key. It is used for this DrawWise session only and is not saved to disk.\n\nLeave blank to disconnect cloud AI.",
+            parent=self, show="*",
+        )
+        if key is None:
+            return
+        key = key.strip()
+        if not key:
+            self.ai_api_key = ""
+            self.ai_mode_var.set("LOCAL ANALYSIS • AI NOT CONNECTED")
+            self.status_var.set("Cloud AI disconnected; local strategy analysis remains available")
+            return
+        model = simpledialog.askstring(
+            "AI model",
+            "OpenAI model ID:",
+            parent=self, initialvalue=self.ai_model or DEFAULT_MODEL,
+        )
+        self.ai_api_key = key
+        self.ai_model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self.ai_mode_var.set(f"OPENAI READY • {self.ai_model}")
+        self.status_var.set("AI Strategy Copilot connected for this session")
+        if self.last_result is not None:
+            self.review_with_ai()
+
+    def review_with_ai(self):
+        if self.last_result is None:
+            messagebox.showinfo("AI Strategy Copilot", "Generate a Maximum Intelligence portfolio first.")
+            return
+        if not self.ai_api_key:
+            if messagebox.askyesno(
+                "Connect AI Strategy Copilot",
+                "Cloud AI is not connected.\n\nWould you like to enter an OpenAI API key for this session?",
+            ):
+                self.configure_ai()
+            return
+        if self._ai_thread and self._ai_thread.is_alive():
+            return
+
+        result = self.last_result
+        key = self.ai_api_key
+        model = self.ai_model
+        self.ai_review_button.configure(state="disabled", text="AI reviewing…")
+        self.ai_mode_var.set(f"REVIEWING • {model}")
+        self.status_var.set("AI Strategy Copilot is independently reviewing the portfolio…")
+
+        def worker():
+            try:
+                review = openai_strategy_review(result, api_key=key, model=model)
+                self.after(0, lambda: self._finish_ai_review(review.text, review.model, None))
+            except Exception as exc:
+                self.after(0, lambda: self._finish_ai_review(None, model, str(exc)))
+
+        self._ai_thread = threading.Thread(target=worker, daemon=True)
+        self._ai_thread.start()
+
+    def _finish_ai_review(self, text: str | None, model: str | None, error: str | None):
+        self.ai_review_button.configure(state="normal", text="Review with AI")
+        if error:
+            self.ai_mode_var.set("LOCAL ANALYSIS • AI REVIEW FAILED")
+            local = local_strategy_review(self.last_result).text if self.last_result is not None else ""
+            self._set_ai_text(local + f"\n\nCloud AI note: {error}")
+            self.status_var.set("AI review failed; mathematical result and local audit are unchanged")
+            return
+        self.ai_mode_var.set(f"OPENAI REVIEW • {model or self.ai_model}")
+        self._set_ai_text(text or "AI returned no review text.")
+        self.status_var.set("AI Strategy Copilot review complete")
 
     def _workspace_button(self, parent, text, command, *, bg, fg):
         return tk.Button(
@@ -428,13 +608,18 @@ class SmartPickApp(tk.Tk):
             lines = int(self.lines_var.get())
         except ValueError:
             lines = 5
-        self.mode_var.set("Best single pick" if lines == 1 else "Smart portfolio")
+        self.mode_var.set("Maximum Intelligence single pick" if lines == 1 else "Maximum Intelligence portfolio")
         self._reset_ticket_scroll()
         # Do not leave an old portfolio visible under a newly selected line count.
         if self.last_result is not None and len(self.last_result.tickets) != lines:
             self.last_result = None
             self._render_empty()
             self.status_var.set(f"Ready to generate {lines} line{'s' if lines != 1 else ''}")
+
+    def on_objective_changed(self):
+        self.last_result = None
+        self._render_empty()
+        self.status_var.set(f"Objective: {self.objective_var.get()}")
 
     def on_game_changed(self):
         cfg = self.config
@@ -469,20 +654,25 @@ class SmartPickApp(tk.Tk):
         except ValueError:
             lines = 5
         self.generate_button.configure(state="disabled", text="Generating…")
-        self.status_var.set("Analysing history and building candidate lines…")
+        self.status_var.set("Searching, optimising and challenging candidate portfolios…")
         self.update_idletasks()
         try:
             result = self.engine.generate(
                 config=cfg,
-                strategy="Smart Ensemble",
+                strategy="Maximum Intelligence",
                 lines=lines,
                 pool_size=max(cfg.default_pool_size, cfg.main_pick + 5),
                 special_pool_size=(cfg.special_range_size if cfg.special_pick else 0),
                 recent_window=min(20, max(5, len(self.engine.analysis_draws(cfg)))),
+                objective=self.objective_var.get(),
             )
             self.last_result = result
             self._render_result(result)
-            self.status_var.set(f"Generated {len(result.tickets)} {cfg.name} Smart Ensemble line(s)")
+            intel = result.intelligence
+            if intel:
+                self.status_var.set(f"Maximum Intelligence complete • rating {intel.portfolio_rating:.0f}/100 • random challenge {intel.random_percentile:.0f}th percentile")
+            else:
+                self.status_var.set(f"Generated {len(result.tickets)} {cfg.name} line(s)")
         except Exception as exc:
             messagebox.showerror("Could not generate picks", str(exc))
             self.status_var.set("Generation failed")
@@ -570,9 +760,15 @@ class SmartPickApp(tk.Tk):
         self._show_recommended_host(False)
         self._show_alternatives(True)
         self._use_scrolling_alternatives()
-        self.pick_subtitle.configure(text="Generate your next Smart Ensemble pick.")
+        self.pick_subtitle.configure(text="Generate your next Maximum Intelligence portfolio.")
         for v in self.summary_vars:
             v.set("—")
+        self.intel_detail_var.set("Maximum Intelligence will show exact portfolio odds and challenge results here.")
+        if hasattr(self, "ai_text"):
+            self._set_ai_text(
+                "Generate a Maximum Intelligence portfolio. DrawWise will run an immediate local strategy audit here. "
+                "Connect an OpenAI API key for a second, independent AI critique of the same mathematical result."
+            )
         empty = tk.Frame(self.ticket_body, bg="#F8FAFC", highlightthickness=1, highlightbackground=PALETTE["line"])
         empty.pack(fill="x", padx=4, pady=4)
         tk.Label(empty, text="🎯", bg="#F8FAFC", fg=PALETTE["blue"], font=("Segoe UI Emoji", 28)).pack(pady=(34, 7))
@@ -587,15 +783,30 @@ class SmartPickApp(tk.Tk):
         self._clear_ticket_body()
         cfg = result.config
         accent = GAME_ACCENTS.get(cfg.key, PALETTE["blue"])
-        covered = len({n for t in result.tickets for n in t.main})
-        mode = "Best single pick" if len(result.tickets) == 1 else "Smart portfolio"
-        self.pick_subtitle.configure(
-            text=f"Smart Ensemble • History: {len(result.draws)} draws • Top-ranked line shown first"
-        )
-        self.summary_vars[0].set(str(len(result.tickets)))
-        self.summary_vars[1].set(f"{len(result.draws)} draws")
-        self.summary_vars[2].set(f"{covered} / {cfg.main_range_size}")
-        self.summary_vars[3].set(mode)
+        intel = result.intelligence
+        if intel:
+            self.pick_subtitle.configure(
+                text=(f"Maximum Intelligence • {intel.objective} • "
+                      f"{intel.candidates_evaluated:,} candidates • {intel.search_moves:,} refinement moves • "
+                      f"{intel.challenge_draws:,} challenge draws")
+            )
+            self.summary_vars[0].set(str(len(result.tickets)))
+            self.summary_vars[1].set(f"{intel.history_gate.history_weight * 100:.1f}%")
+            self.summary_vars[2].set(f"{intel.portfolio_rating:.0f} / 100")
+            self.summary_vars[3].set(f"{intel.random_percentile:.0f}th pct")
+            self.intel_detail_var.set(
+                f"Exact portfolio top-prize chance: {intel.jackpot_odds}  •  "
+                f"{intel.target_label}: {intel.target_probability:.2%} vs random median {intel.random_median_probability:.2%}  •  "
+                f"History influence {intel.history_gate.history_weight:.1%} ({intel.history_gate.verdict})"
+            )
+        else:
+            covered = len({n for t in result.tickets for n in t.main})
+            self.pick_subtitle.configure(text=f"History: {len(result.draws)} draws")
+            self.summary_vars[0].set(str(len(result.tickets)))
+            self.summary_vars[1].set(f"{len(result.draws)} draws")
+            self.summary_vars[2].set(f"{covered} / {cfg.main_range_size}")
+            self.summary_vars[3].set("Smart portfolio")
+            self.intel_detail_var.set("Portfolio intelligence report unavailable for this strategy.")
 
         if not result.tickets:
             self._show_recommended_host(False)
@@ -609,13 +820,13 @@ class SmartPickApp(tk.Tk):
             self.recommended_host, result.tickets[0], 0, True, accent, cfg
         )
 
-        # One-line mode has no alternatives.  Short portfolios are intentionally
-        # non-scrolling so LINE 02 cannot be clipped by a canvas viewport.  Only
-        # 10/20-line portfolios use the scrolling canvas.
+        # One-line mode has no alternatives. Three-line mode fits without scrolling.
+        # Five, ten and twenty-line portfolios use the visible scrollbar so every line
+        # is reachable even on 720p/768p-height Windows displays.
         has_alternatives = len(result.tickets) > 1
         self._show_alternatives(has_alternatives)
         if has_alternatives:
-            if len(result.tickets) <= 5:
+            if not alternatives_need_scroll(len(result.tickets)):
                 self._use_static_alternatives()
                 parent = self.static_alternatives_body
             else:
@@ -627,6 +838,9 @@ class SmartPickApp(tk.Tk):
                 )
 
         self._reset_ticket_scroll()
+        self._show_local_copilot_review(result)
+        if self.ai_api_key:
+            self.after(250, self.review_with_ai)
 
     def _render_ticket_card(self, parent, ticket, idx: int, recommended: bool, accent: str, cfg, compact: bool = False):
         border = accent if recommended else PALETTE["line"]
@@ -683,7 +897,7 @@ class SmartPickApp(tk.Tk):
                     pady=7 if recommended else 5,
                 ).pack(side="left", padx=(0, 8 if recommended else 7))
 
-        sub = "Top-ranked candidate in this run" if recommended else "Diversified Smart Ensemble alternative"
+        sub = "Top-ranked member of the optimized portfolio" if recommended else "Maximum Intelligence portfolio alternative"
         tk.Label(
             middle, text=sub, bg="#FFFFFF", fg=PALETTE["muted"],
             font=("Segoe UI", 8 if recommended or not compact else 7),
@@ -704,7 +918,7 @@ class SmartPickApp(tk.Tk):
     def _reset_ticket_scroll(self):
         """Reset the alternatives viewport after state/render changes.
 
-        The Recommended card is sticky outside this canvas in V5.3.3.  We still force
+        The Recommended card is sticky outside this canvas.  We still force
         alternatives to absolute zero in multiple event-loop phases so LINE 02 is
         always the first alternative after Generate/Regenerate/game/line changes.
         """
@@ -750,19 +964,27 @@ class SmartPickApp(tk.Tk):
         try:
             replacement = self.engine.generate(
                 config=cfg,
-                strategy="Smart Ensemble",
+                strategy="Maximum Intelligence",
                 lines=1,
                 pool_size=max(cfg.default_pool_size, cfg.main_pick + 5),
                 special_pool_size=(cfg.special_range_size if cfg.special_pick else 0),
                 recent_window=min(20, max(5, len(self.engine.analysis_draws(cfg)))),
                 excluded_main_lines=excluded,
+                objective=self.objective_var.get(),
             )
             if not replacement.tickets:
                 raise ValueError("No alternative candidate was generated")
             self.last_result.tickets[0] = replacement.tickets[0]
             self.last_result.base_pool = sorted({n for t in self.last_result.tickets for n in t.main})
+            previous_intel = self.last_result.intelligence
+            self.last_result.intelligence = self.engine.evaluate_intelligence(
+                cfg, self.last_result.draws, self.last_result.tickets, self.last_result.base_pool,
+                self.objective_var.get(),
+                candidates_evaluated=(previous_intel.candidates_evaluated if previous_intel else 0),
+                search_moves=(previous_intel.search_moves if previous_intel else 0),
+            )
             self._render_result(self.last_result)
-            self.status_var.set("Recommended line replaced with the next ranked alternative")
+            self.status_var.set("Recommended line replaced and portfolio re-evaluated")
         except Exception as exc:
             messagebox.showinfo("No new pick", f"DrawWise could not produce another distinct candidate right now.\n\n{exc}")
             self.status_var.set("Recommended line unchanged")
@@ -810,7 +1032,8 @@ class SmartPickApp(tk.Tk):
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "game": cfg.name,
             "game_key": cfg.key,
-            "method": "Smart Ensemble",
+            "method": "Maximum Intelligence",
+            "objective": self.objective_var.get(),
             "tickets": [
                 {"main": list(t.main), "special": list(t.special)} for t in self.last_result.tickets
             ],
@@ -884,7 +1107,7 @@ class SmartPickApp(tk.Tk):
             self.status_var.set("Could not refresh online results; using current history")
             messagebox.showinfo(
                 "Using current history",
-                "DrawWise could not refresh the official source right now. Your existing local history is unchanged and can still be used for Smart Ensemble.\n\nYou can still use Import history file if you downloaded the results yourself.",
+                "DrawWise could not refresh the official source right now. Your existing local history is unchanged and can still be used for Maximum Intelligence.\n\nYou can still use Import history file if you downloaded the results yourself.",
             )
             return
 
@@ -1039,6 +1262,7 @@ class SmartPickApp(tk.Tk):
         self.bind_all("<Alt-g>", lambda _e: self.generate())
         self.bind_all("<Control-s>", lambda _e: self.save_picks())
         self.bind_all("<Control-r>", lambda _e: self.refresh_results())
+        self.bind_all("<Control-i>", lambda _e: self.review_with_ai())
 
 
 def main(start_game: str | None = None):

@@ -17,6 +17,9 @@ from core.models import Draw
 from core.strategies import smart_ensemble_score, _pair_history_signal
 from datetime import date
 from core.odds import top_prize_denominator, single_round_top_prize_denominator
+from core.intelligence import exact_main_match_probability, exact_main_threshold_probability, randomness_gate
+from core.ai_copilot import local_strategy_review, portfolio_payload
+from smart_pick_app import alternatives_need_scroll
 from games.registry import ALL_GAMES, BY_KEY
 from core.rule_eras import filter_current_analysis_draws, era_summary, rule_profile, current_purchase_rounds
 from core.online_updates import (
@@ -777,6 +780,103 @@ class DrawWiseTests(unittest.TestCase):
             self.assertEqual(report.accepted_rows, 1)
             self.assertEqual(report.draws[0].main, (5, 29, 39, 48, 49))
             self.assertEqual(report.draws[0].special, (4, 8))
+
+    def test_v54_hypergeometric_main_probabilities_sum_to_one(self):
+        for key in ("lotto", "euromillions", "set_for_life", "thunderball"):
+            cfg = BY_KEY[key]
+            total = sum(exact_main_match_probability(cfg, r) for r in range(cfg.main_pick + 1))
+            self.assertTrue(math.isclose(total, 1.0, rel_tol=1e-12, abs_tol=1e-12), key)
+            self.assertGreater(exact_main_threshold_probability(cfg, 3), 0.0)
+            self.assertLess(exact_main_threshold_probability(cfg, 3), 1.0)
+
+    def test_v54_maximum_intelligence_generates_report_for_core_games(self):
+        for key in ("lotto", "euromillions", "set_for_life", "thunderball"):
+            cfg = BY_KEY[key]
+            result = self.engine.generate(
+                config=cfg,
+                strategy="Maximum Intelligence",
+                lines=5,
+                pool_size=max(cfg.default_pool_size, cfg.main_pick + 5),
+                special_pool_size=cfg.special_range_size if cfg.special_pick else 0,
+                recent_window=20,
+                seed=540,
+                objective="Best overall portfolio",
+            )
+            self.assertEqual(len(result.tickets), 5, key)
+            self.assertEqual(len(set((t.main, t.special) for t in result.tickets)), 5, key)
+            self.assertIsNotNone(result.intelligence, key)
+            intel = result.intelligence
+            self.assertGreater(intel.candidates_evaluated, 0, key)
+            self.assertGreater(intel.challenge_draws, 0, key)
+            self.assertGreaterEqual(intel.random_percentile, 0.0, key)
+            self.assertLessEqual(intel.random_percentile, 100.0, key)
+            self.assertGreaterEqual(intel.portfolio_rating, 0.0, key)
+            self.assertLessEqual(intel.portfolio_rating, 100.0, key)
+
+    def test_v54_randomness_gate_caps_history_weight(self):
+        cfg = BY_KEY["lotto"]
+        gate = randomness_gate(self.engine.analysis_draws(cfg), cfg)
+        self.assertGreaterEqual(gate.history_weight, 0.0)
+        self.assertLessEqual(gate.history_weight, 0.20)
+        self.assertGreaterEqual(gate.normalized_entropy, 0.0)
+        self.assertLessEqual(gate.normalized_entropy, 1.0)
+
+    def test_v54_set_for_life_ten_lines_cover_all_life_balls(self):
+        cfg = BY_KEY["set_for_life"]
+        result = self.engine.generate(
+            config=cfg,
+            strategy="Maximum Intelligence",
+            lines=10,
+            pool_size=max(cfg.default_pool_size, cfg.main_pick + 5),
+            special_pool_size=cfg.special_range_size,
+            recent_window=20,
+            seed=541,
+            objective="Minimise no-win proxy",
+        )
+        covered = {n for ticket in result.tickets for n in ticket.special}
+        self.assertEqual(covered, set(range(1, 11)))
+
+
+    def test_v542_ai_copilot_payload_is_portfolio_only(self):
+        cfg = BY_KEY["euromillions"]
+        result = self.engine.generate(
+            config=cfg, strategy="Maximum Intelligence", lines=3,
+            pool_size=max(cfg.default_pool_size, cfg.main_pick + 5),
+            special_pool_size=cfg.special_range_size, recent_window=20, seed=5411,
+            objective="Best overall portfolio",
+        )
+        payload = portfolio_payload(result)
+        self.assertEqual(payload["game"], cfg.name)
+        self.assertEqual(payload["line_count"], 3)
+        self.assertEqual(len(payload["tickets"]), 3)
+        self.assertIn("intelligence", payload)
+        self.assertNotIn("user", payload)
+        self.assertNotIn("api_key", payload)
+
+    def test_v542_local_copilot_reviews_maximum_intelligence_result(self):
+        cfg = BY_KEY["lotto"]
+        result = self.engine.generate(
+            config=cfg, strategy="Maximum Intelligence", lines=3,
+            pool_size=max(cfg.default_pool_size, cfg.main_pick + 5),
+            special_pool_size=0, recent_window=20, seed=5412,
+            objective="Best overall portfolio",
+        )
+        review = local_strategy_review(result)
+        self.assertEqual(review.source, "local")
+        self.assertIn("LOCAL STRATEGY REVIEW", review.text)
+        self.assertIn(result.intelligence.jackpot_odds, review.text)
+        self.assertIn("does not predict", review.text)
+
+    def test_v542_five_line_portfolio_uses_scrollable_alternatives(self):
+        self.assertFalse(alternatives_need_scroll(1))
+        self.assertFalse(alternatives_need_scroll(3))
+        self.assertTrue(alternatives_need_scroll(5))
+        self.assertTrue(alternatives_need_scroll(10))
+        self.assertTrue(alternatives_need_scroll(20))
+
+    def test_v542_installed_version_is_542(self):
+        from app_paths import APP_VERSION
+        self.assertEqual(APP_VERSION, "5.4.2")
 
 
 if __name__ == "__main__":

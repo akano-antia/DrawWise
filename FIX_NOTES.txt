@@ -1,16 +1,17 @@
-DrawWise 5.3.3 Installer Builder — Full Reliability Build
-========================================================
+DrawWise 5.4.0 — Release Notes
+==============================
 
-This is a fresh, self-contained installer builder.
-It does NOT require any previous DrawWise installer-builder folder.
+Primary upgrade:
+- Maximum Intelligence whole-portfolio optimisation replaces Smart Ensemble as
+  the normal Smart Pick engine. Smart Ensemble remains available in Advanced Tools.
 
-Reliability change:
-- PowerShell Compress-Archive is not used for the PyInstaller payload.
-- Windows tar.exe ZIP creation is used with automatic retries for transient Defender/indexing file locks.
-- Stale build, dist, installer-output, stage, and payload folders are cleaned before rebuilding.
+UI reliability:
+- Advanced Tools is now in the permanent top navigation so it cannot be clipped.
+- Generate My Numbers sits above the lower status cards and remains visible at the
+  supported minimum window height.
+- The result action buttons were compacted so Save is not clipped.
 
-Run:
-  BUILD_SETUP.bat
-
-Expected output:
-  installer-output\DrawWise-Setup-5.3.3.exe
+Mathematical boundary:
+- The engine optimises portfolio coverage and match-threshold behaviour.
+- It does not claim that a fair valid line has a different jackpot probability from
+  any other fair valid line.

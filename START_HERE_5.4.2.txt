@@ -1,0 +1,5 @@
+DRAWWISE 5.4.2 — MAXIMUM INTELLIGENCE UI RELIABILITY
+
+Run RUN_DRAW_WISE.bat for the Maximum Intelligence interface.
+Five-line and larger portfolios provide a visible scrollbar for all alternatives.
+Advanced Tools remains available from the left sidebar.

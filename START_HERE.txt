@@ -1,14 +1,21 @@
-DRAW WISE 5.3.3 — SMART PICK
+DRAW WISE 5.4.0 — MAXIMUM INTELLIGENCE
 
-NORMAL TEST RUN
+NORMAL RUN
 1. Double-click RUN_DRAW_WISE.bat
 2. Choose a game
 3. Choose 1, 3, 5, 10 or 20 lines
-4. Click GENERATE MY NUMBERS
+4. Choose an optimisation objective
+5. Click GENERATE MY NUMBERS
 
-BUILD A PROPER WINDOWS INSTALLER
-1. Double-click BUILD_SETUP.bat
-2. When complete, use installer-output\DrawWise-Setup-5.3.3.exe
-3. See INSTALLER_START_HERE.txt for details.
+WHAT V5.4 DOES
+- Searches thousands of candidate lines.
+- Optimises the whole portfolio, not each line in isolation.
+- Controls pair/triple duplication and concentrated overlap.
+- Uses a Randomness Gate to keep history secondary when results look uniform.
+- Refines the portfolio with local/evolutionary search.
+- Challenges the final portfolio against random portfolios on up to 100,000 synthetic fair draws.
+- Reports exact portfolio top-prize odds separately from the optimisation score.
 
-Smart Ensemble scoring is unchanged.
+BUILD
+- BUILD_DESKTOP_APP.bat creates a portable Windows desktop build.
+- The separate DrawWise 5.4.0 Installer Builder creates DrawWise-Setup-5.4.0.exe.

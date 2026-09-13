@@ -70,6 +70,9 @@ PALETTE = {
 
 
 STRATEGY_HELP = {
+    "Maximum Intelligence": (
+        "DrawWise V5.4 whole-portfolio optimiser. Builds a broad candidate set, gates weak historical signals, controls convex pairwise overlap, performs local/evolutionary refinement and Monte Carlo-challenges the final portfolio against random portfolios. It does not alter the fair-draw jackpot probability of an individual valid line."
+    ),
     "Smart Ensemble": (
         "Personal V5.1 default. Combines multiple historical views, recent activity, pair signals, structural balance and low-overlap portfolio selection with automatic small-sample shrinkage."
     ),

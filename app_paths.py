@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "DrawWise"
-APP_VERSION = "5.3.3"
+APP_VERSION = "5.4.2"
 
 
 def resource_root() -> Path:

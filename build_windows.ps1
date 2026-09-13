@@ -44,22 +44,5 @@ Write-Host ""
 Write-Host "The entire dist\DrawWise folder is portable and can run on another Windows PC without Python or VS Code." -ForegroundColor Yellow
 Write-Host ""
 
-# Optional installer build if Inno Setup is installed.
-$innoCandidates = @(
-    "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
-    "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-)
-$inno = $innoCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if ($inno) {
-    Write-Host "Inno Setup found. Building installer..." -ForegroundColor Cyan
-    & $inno "installer\DrawWise.iss"
-    Write-Host "Installer output:" -ForegroundColor Green
-    Write-Host "  $PSScriptRoot\installer-output\DrawWise-Setup-5.3.3.exe"
-} else {
-    Write-Host "Inno Setup was not found, so the portable desktop app was built but the Setup.exe was not." -ForegroundColor Yellow
-    Write-Host "Install Inno Setup on this BUILD computer and run BUILD_INSTALLER_ONLY.bat if you want a normal installer." -ForegroundColor Yellow
-}
+Write-Host "For a normal Setup.exe, use the separate DrawWise 5.4.0 Installer Builder." -ForegroundColor Cyan
+Write-Host "That builder creates installer-output\DrawWise-Setup-5.4.0.exe without requiring Inno Setup." -ForegroundColor Gray

@@ -1,0 +1,18 @@
+DRAWWISE 5.4.1 — MAXIMUM INTELLIGENCE + AI STRATEGY COPILOT
+
+NORMAL USE
+1. Run RUN_DRAW_WISE.bat (source) or open the installed DrawWise shortcut.
+2. Choose a game.
+3. Choose how many lines you want.
+4. Leave the objective on Best overall portfolio unless you have a specific goal.
+5. Click GENERATE MY NUMBERS.
+6. Read the side-by-side Strategy Copilot review.
+
+AI IS OPTIONAL
+- Local strategy analysis works with no internet and no API key.
+- For an independent OpenAI review, click Connect / change AI.
+- Pasted API keys are session-only and are not saved to disk.
+- The mathematical engine selects the portfolio; AI critiques it and may recommend a rerun/objective change.
+
+ADVANCED TOOLS
+Use the Advanced Tools button inside DrawWise. The installed shortcut always opens Maximum Intelligence first.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import random
 from collections import Counter
 from math import comb
@@ -8,8 +9,10 @@ from typing import Iterable
 
 from core.models import Draw, GameConfig, NumberStat, Ticket
 from core.stats import hot_cold_pool, ranked_pool, score_lookup
+from core.intelligence import OBJECTIVES, balanced_overlap_penalty, randomness_gate, unique_tuple_coverage
 
 STRATEGIES = [
+    "Maximum Intelligence",
     "Smart Ensemble",
     "Smart Pick",
     "Diversified Smart Portfolio",
@@ -462,6 +465,126 @@ def _assign_specials_ensemble(
 
     return [Ticket(main=m, special=s) for m, s in zip(main_lines, selected)]
 
+
+
+def _portfolio_objective_value(
+    lines: list[tuple[int, ...]],
+    config: GameConfig,
+    objective: str,
+    line_quality: dict[tuple[int, ...], float],
+) -> float:
+    """Structural whole-portfolio objective used by Maximum Intelligence.
+
+    The value is a search objective, not a probability claim.  Exact jackpot odds are
+    unchanged by how distinct valid lines are arranged; this objective concentrates on
+    coverage, convex overlap control and crowd-sharing risk.
+    """
+    if not lines:
+        return float('-inf')
+    unique_lines = list(dict.fromkeys(tuple(sorted(line)) for line in lines))
+    if len(unique_lines) != len(lines):
+        return float('-inf')
+
+    pair_cov = unique_tuple_coverage(unique_lines, 2)
+    triple_cov = unique_tuple_coverage(unique_lines, 3)
+    numbers = len(set().union(*(set(line) for line in unique_lines)))
+    overlap_cost = balanced_overlap_penalty(unique_lines)
+    crowd = sum(crowd_risk_penalty(line, config) for line in unique_lines)
+    quality = sum(line_quality.get(line, 0.0) for line in unique_lines) / len(unique_lines)
+
+    # Different objectives tune the same mathematically grounded portfolio features.
+    if objective == "Minimise no-win proxy":
+        return (2.8 * pair_cov) + (1.9 * triple_cov) + (5.0 * numbers) + (1.2 * quality) - (5.2 * overlap_cost) - (2.0 * crowd)
+    if objective == "Maximise 3+ coverage":
+        return (1.2 * pair_cov) + (4.5 * triple_cov) + (3.0 * numbers) + (1.0 * quality) - (4.8 * overlap_cost) - (1.6 * crowd)
+    if objective == "Minimise prize sharing":
+        return (1.0 * pair_cov) + (1.3 * triple_cov) + (2.5 * numbers) + (0.8 * quality) - (3.8 * overlap_cost) - (8.5 * crowd)
+    # Best overall portfolio
+    return (2.1 * pair_cov) + (2.8 * triple_cov) + (4.0 * numbers) + (1.2 * quality) - (4.6 * overlap_cost) - (2.6 * crowd)
+
+
+def _select_maximum_intelligence(
+    config: GameConfig,
+    draws: list[Draw],
+    stats: list[NumberStat],
+    candidates: list[tuple[int, ...]],
+    lines: int,
+    objective: str,
+    rng: random.Random,
+) -> tuple[list[tuple[int, ...]], int]:
+    """Whole-portfolio optimiser with greedy construction + local/evolutionary refinement."""
+    gate = randomness_gate(draws, config)
+    pair_signal = _pair_history_signal(draws)
+    previous_lines = {tuple(d.main) for d in draws}
+
+    # Structural quality dominates. Historical ensemble information is admitted only
+    # through the conservative Randomness Gate and therefore cannot dominate the search.
+    raw_history = {
+        line: smart_ensemble_score(line, config, stats, draws, pair_signal, previous_lines)
+        for line in candidates
+    }
+    if raw_history:
+        lo, hi = min(raw_history.values()), max(raw_history.values())
+        span = max(1e-12, hi - lo)
+    else:
+        lo, span = 0.0, 1.0
+    line_quality = {}
+    for line in candidates:
+        h = (raw_history[line] - lo) / span
+        structural = (1.65 * balance_score(line, config)) - (0.90 * crowd_risk_penalty(line, config))
+        line_quality[line] = structural + (gate.history_weight * 2.0 * h)
+
+    # Reduce the refinement pool to strong but varied candidates; retain the broad pool
+    # for the first greedy pass so coverage can escape a concentrated historical subset.
+    seed_lines = _select_greedy(
+        candidates,
+        lines,
+        lambda line: line_quality[line],
+        triple_weight=0.35 if objective != "Maximise 3+ coverage" else 0.85,
+        pair_weight=1.05,
+        overlap_weight=1.15,
+        number_weight=5.6,
+    )
+
+    ranked_candidates = sorted(candidates, key=lambda x: (-line_quality[x], x))
+    refinement_pool = ranked_candidates[:min(len(ranked_candidates), max(600, lines * 90))]
+    # Add random candidates from the tail to preserve escape routes from local optima.
+    if len(ranked_candidates) > len(refinement_pool):
+        tail = ranked_candidates[len(refinement_pool):]
+        refinement_pool += rng.sample(tail, min(len(tail), max(120, lines * 20)))
+
+    current = list(seed_lines)
+    current_score = _portfolio_objective_value(current, config, objective, line_quality)
+    best = list(current)
+    best_score = current_score
+    moves = 0
+
+    # Deterministic-ish simulated annealing / hill-climb hybrid.  The temperature is
+    # intentionally small because the greedy seed is already strong.
+    iterations = min(4500, max(900, lines * 180))
+    temperature = 3.0
+    for step in range(iterations):
+        moves += 1
+        idx = rng.randrange(len(current))
+        replacement = rng.choice(refinement_pool)
+        if replacement in current:
+            continue
+        proposal = list(current)
+        proposal[idx] = replacement
+        score = _portfolio_objective_value(proposal, config, objective, line_quality)
+        delta = score - current_score
+        t = max(0.03, temperature * (1.0 - (step / iterations)))
+        if delta >= 0 or rng.random() < math.exp(max(-60.0, delta / t)):
+            current, current_score = proposal, score
+            if score > best_score:
+                best, best_score = list(proposal), score
+
+    # Keep the strongest individual candidate first for a stable Recommended card,
+    # then preserve the optimized portfolio membership for the alternatives.
+    best.sort(key=lambda line: (-line_quality[line], line))
+    return best, moves
+
+
 def generate_tickets(
     config: GameConfig,
     draws: list[Draw],
@@ -474,6 +597,8 @@ def generate_tickets(
     key_numbers: list[int] | None = None,
     seed: int | None = None,
     excluded_main_lines: set[tuple[int, ...]] | None = None,
+    objective: str = "Best overall portfolio",
+    diagnostics_out: dict | None = None,
 ) -> tuple[list[Ticket], list[int]]:
     if strategy not in STRATEGIES:
         raise ValueError(f"Unknown strategy: {strategy}")
@@ -484,12 +609,45 @@ def generate_tickets(
     rng = random.Random(seed)
     excluded_main_lines = {tuple(sorted(line)) for line in (excluded_main_lines or set())}
 
+    if objective not in OBJECTIVES:
+        objective = "Best overall portfolio"
+
     for n in key_numbers:
         if not (config.main_min <= n <= config.main_max):
             raise ValueError(f"Key number {n} is outside {config.main_min}-{config.main_max}")
     if len(key_numbers) >= config.main_pick:
         if len(key_numbers) > config.main_pick:
             raise ValueError(f"Use at most {config.main_pick} key numbers")
+
+    if strategy == "Maximum Intelligence":
+        candidates = [
+            line for line in _smart_ensemble_candidates(config, main_stats, max(lines, 20), rng)
+            if tuple(sorted(line)) not in excluded_main_lines
+        ]
+        if not candidates:
+            raise ValueError("No Maximum Intelligence candidates remain after exclusions")
+        search_moves = 0
+        if lines == 1:
+            # One line cannot benefit from portfolio coverage. Use the same gated
+            # line-quality philosophy while retaining structural/crowd controls.
+            gate = randomness_gate(draws, config)
+            pair_signal = _pair_history_signal(draws)
+            previous_lines = {tuple(d.main) for d in draws}
+            def one_score(line):
+                hist = smart_ensemble_score(line, config, main_stats, draws, pair_signal, previous_lines)
+                return (2.0 * balance_score(line, config)) - (1.4 * crowd_risk_penalty(line, config)) + (gate.history_weight * hist)
+            main_lines = [max(candidates, key=lambda line: (one_score(line), tuple(-n for n in line)))]
+        else:
+            main_lines, search_moves = _select_maximum_intelligence(
+                config, draws, main_stats, candidates, lines, objective, rng
+            )
+        if diagnostics_out is not None:
+            diagnostics_out["candidates_evaluated"] = len(candidates)
+            diagnostics_out["search_moves"] = search_moves
+        base_pool = sorted(set(n for line in main_lines for n in line))
+        # Special balls are diversified across the portfolio; their historical
+        # component is already shrinkage-aware in the ensemble assignment.
+        return _assign_specials_ensemble(main_lines, config, special_stats, draws, rng), base_pool
 
     if strategy in {"Smart Ensemble", "Smart Pick"}:
         # V5.1: several candidate-generation views vote through one shrinkage-aware

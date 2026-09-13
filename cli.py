@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parent
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DrawWise 5.1 command-line generator")
+    parser = argparse.ArgumentParser(description="DrawWise 5.4 command-line generator")
     parser.add_argument("--game", choices=BY_KEY, required=True)
-    parser.add_argument("--strategy", choices=STRATEGIES, default="Smart Ensemble")
+    parser.add_argument("--strategy", choices=STRATEGIES, default="Maximum Intelligence")
     parser.add_argument("--lines", type=int, default=10)
     parser.add_argument("--pool", type=int, default=None)
     parser.add_argument("--special-pool", type=int, default=None)

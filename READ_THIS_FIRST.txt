@@ -1,18 +1,20 @@
-DrawWise 5.3.3 Installer Builder
-===============================
+DrawWise 5.4.0 — Maximum Intelligence
+=====================================
 
-This build fixes the manual draw-history workflow in the installed desktop app.
+The normal workflow remains simple:
+1. Select the lottery game.
+2. Select the number of lines.
+3. Select the optimisation objective.
+4. Click GENERATE MY NUMBERS.
 
-After installing DrawWise 5.3.3:
-1. Select the game that matches the downloaded Lottery result file.
-2. Under RESULT HISTORY click "Import history file".
-3. Choose the downloaded CSV or Excel workbook.
-4. Review the preview showing new/corrected records.
-5. Approve the import. DrawWise backs up the previous history automatically.
+The V5.4 engine now performs whole-portfolio optimisation, overlap control,
+Randomness Gate historical shrinkage, local/evolutionary refinement and a
+Monte Carlo challenge against random portfolios.
 
-"Update online results" remains available for automatic source checks.
-"Advanced Tools" is also fixed, but it is no longer required just to import history.
+Result-history maintenance remains available from the left sidebar:
+- Update online results
+- Import history file
 
-BUILD:
-Double-click BUILD_SETUP.bat on Windows.
-The finished installer appears in installer-output\DrawWise-Setup-5.3.3.exe
+Advanced Tools remains available from the always-visible navigation button.
+
+Run RUN_TESTS.bat to execute the 59-test regression suite.
